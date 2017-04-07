@@ -657,7 +657,7 @@ func CouchbaseTestWriteCasXattrRaw(t *testing.T) {
 // TestWriteCasTombstoneResurrect.  Verifies writing a new document body and xattr to a logically deleted document (xattr still exists)
 // TODO: This fails with key not found trying to do a CAS-safe rewrite of the doc.  Updating the doc via subdoc (with access_deleted) is
 // expected to work - need to retry when GOCBC-181 is available.
-func TestWriteCasXattrTombstoneResurrect(t *testing.T) {
+func CouchbaseTestWriteCasXattrTombstoneResurrect(t *testing.T) {
 
 	b := GetBucketOrPanic()
 	bucket, ok := b.(*CouchbaseBucketGoCB)
@@ -735,7 +735,7 @@ func TestWriteCasXattrTombstoneResurrect(t *testing.T) {
 }
 
 // TestWriteCasXATTRDeleted.  Validates update of xattr on logically deleted document.
-func TestWriteCasXattrTombstoneXattrUpdate(t *testing.T) {
+func CouchbaseTestWriteCasXattrTombstoneXattrUpdate(t *testing.T) {
 
 	b := GetBucketOrPanic()
 	bucket, ok := b.(*CouchbaseBucketGoCB)
