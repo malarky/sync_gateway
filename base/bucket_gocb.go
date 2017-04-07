@@ -908,11 +908,12 @@ func (bucket CouchbaseBucketGoCB) GetWithXattr(k string, xattr string, rv interf
 		// TODO: Replace with single op that has built-in handling for accessDeleted for xattr retrieval.
 		gocbExpvars.Add("Get", 1)
 		casGoCB, err := bucket.Bucket.Get(k, rv)
+		cas = uint64(casGoCB)
 
 		// If key not found, attempt to retrieve the xattr only.  Otherwise standard error handling
 		if err != nil && err != gocbcore.ErrKeyNotFound {
 			shouldRetry = isRecoverableGoCBError(err)
-			return shouldRetry, err, uint64(casGoCB)
+			return shouldRetry, err, cas
 		}
 
 		// TODO: Replace with gocb flag definition when https://issues.couchbase.com/browse/GOCBC-178 is implemented
@@ -923,7 +924,8 @@ func (bucket CouchbaseBucketGoCB) GetWithXattr(k string, xattr string, rv interf
 		if err != nil && err != gocbcore.ErrSubDocSuccessDeleted {
 			// Non-existent doc and xattr returns ErrSubDocBadMulti.  To simplify caller handling, return not found
 			if err == gocbcore.ErrSubDocBadMulti {
-				return false, gocb.ErrKeyNotFound, nil
+				// Xattr doesn't exist, or can't be retrieved.  Don't return error - just empty xv.
+				return false, nil, cas
 			}
 			shouldRetry = isRecoverableGoCBError(err)
 			return shouldRetry, err, uint64(casGoCB)
@@ -933,7 +935,8 @@ func (bucket CouchbaseBucketGoCB) GetWithXattr(k string, xattr string, rv interf
 			LogTo("gocb", "Unable to retrieve xattr content for key=%s, xattr=%s: %v", k, xattr, err)
 			return false, err, nil
 		}
-		return false, nil, uint64(res.Cas())
+		cas = uint64(res.Cas())
+		return false, nil, cas
 	}
 
 	sleeper := CreateDoublingSleeperFunc(
@@ -1171,6 +1174,7 @@ func (bucket CouchbaseBucketGoCB) WriteUpdateWithXattr(k string, xattr string, e
 		}
 
 		// CAS-safe write of the new value and xattr
+		LogTo("gocb", "Calling WriteCasWithXattr for key: %s cas: %d, value: %v, xattr:%v", k, cas, updatedValue, xattrMap)
 		_, err = bucket.WriteCasWithXattr(k, xattr, exp, cas, updatedValue, xattrMap)
 		// ErrKeyExists is CAS failure, which we want to retry.  Other non-recoverable errors should cancel the
 		// WriteUpdate.

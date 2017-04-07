@@ -46,6 +46,12 @@ var RunStateString = []string{
 	DBResyncing: "Resyncing",
 }
 
+const DefaultRevsLimit = 1000
+const DefaultUseXattrs = false        // Whether Sync Gateway uses xattrs for metadata storage, if not specified in the config
+const KSyncKeyPrefix = "_sync:"       // All special/internal documents the gateway creates have this prefix in their keys.
+const kSyncDataKey = "_sync:syncdata" // Key used to store sync function
+const KSyncXattr = "_sync"            // Name of XATTR used to store sync metadata
+
 // Basic description of a database. Shared between all Database objects on the same database.
 // This object is thread-safe so it can be shared between HTTP handlers.
 type DatabaseContext struct {
@@ -91,12 +97,10 @@ type OidcTestProviderOptions struct {
 }
 
 type UnsupportedOptions struct {
-	EnableXATTR      bool `json:"enable_extended_attributes"`
+	EnableXattr      bool `json:"enable_extended_attributes"`
 	EnableUserViews  bool
 	OidcTestProvider OidcTestProviderOptions
 }
-
-const DefaultRevsLimit = 1000
 
 // Represents a simulated CouchDB database. A new instance is created for each HTTP request,
 // so this struct does not have to be thread-safe.
@@ -104,9 +108,6 @@ type Database struct {
 	*DatabaseContext
 	user auth.User
 }
-
-// All special/internal documents the gateway creates have this prefix in their keys.
-const KSyncKeyPrefix = "_sync:"
 
 var dbExpvars = expvar.NewMap("syncGateway_db")
 
@@ -794,8 +795,6 @@ func VacuumAttachments(bucket base.Bucket) (int, error) {
 
 //////// SYNC FUNCTION:
 
-const kSyncDataKey = "_sync:syncdata"
-
 // Sets the database context's sync function based on the JS code from config.
 // Returns a boolean indicating whether the function is different from the saved one.
 // If multiple gateway instances try to update the function at the same time (to the same new
@@ -875,31 +874,22 @@ func (db *Database) UpdateAllDocChannels(doCurrentDocs bool, doImportDocs bool) 
 		rowKey := row.Key.([]interface{})
 		docid := rowKey[1].(string)
 		key := realDocID(docid)
-		//base.Log("\tupdating %q", docid)
-		err := db.Bucket.Update(key, 0, func(currentValue []byte) ([]byte, error) {
-			// Be careful: this block can be invoked multiple times if there are races!
-			if currentValue == nil {
-				return nil, couchbase.UpdateCancel // someone deleted it?!
-			}
-			doc, err := unmarshalDocument(docid, currentValue)
-			if err != nil {
-				return nil, err
-			}
 
+		documentUpdateFunc := func(doc *document) (updatedDoc *document, shouldUpdate bool, err error) {
 			imported := false
 			if !doc.HasValidSyncData(db.writeSequences()) {
 				// This is a document not known to the sync gateway. Ignore or import it:
 				if !doImportDocs {
-					return nil, couchbase.UpdateCancel
+					return nil, false, couchbase.UpdateCancel
 				}
 				imported = true
 				if err = db.initializeSyncData(doc); err != nil {
-					return nil, err
+					return nil, false, err
 				}
 				base.LogTo("CRUD", "\tImporting document %q --> rev %q", docid, doc.CurrentRev)
 			} else {
 				if !doCurrentDocs {
-					return nil, couchbase.UpdateCancel
+					return nil, false, couchbase.UpdateCancel
 				}
 				base.LogTo("CRUD", "\tRe-syncing document %q", docid)
 			}
@@ -923,14 +913,53 @@ func (db *Database) UpdateAllDocChannels(doCurrentDocs bool, doImportDocs bool) 
 						len(doc.updateChannels(channels))
 				}
 			})
+			shouldUpdate = changed > 0 || imported
+			return doc, shouldUpdate, nil
+		}
+		var err error
+		if db.UseXattrs() {
+			err = db.Bucket.WriteUpdateWithXattr(key, KSyncXattr, 0, func(currentValue []byte, currentXattr []byte) (raw []byte, rawXattr []byte, err error) {
+				if currentValue == nil || len(currentValue) == 0 {
+					return nil, nil, errors.New("Cancel update")
+				}
+				doc, err := unmarshalDocumentWithXattr(docid, currentValue, currentXattr)
+				if err != nil {
+					return nil, nil, err
+				}
 
-			if changed > 0 || imported {
-				base.LogTo("Access", "Saving updated channels and access grants of %q", docid)
-				return json.Marshal(doc)
-			} else {
-				return nil, couchbase.UpdateCancel
-			}
-		})
+				updatedDoc, shouldUpdate, err := documentUpdateFunc(doc)
+				if err != nil {
+					return nil, nil, err
+				}
+				if shouldUpdate {
+					base.LogTo("Access", "Saving updated channels and access grants of %q", docid)
+					return updatedDoc.MarshalWithXattr()
+				} else {
+					return nil, nil, errors.New("Cancel update")
+				}
+			})
+		} else {
+			err = db.Bucket.Update(key, 0, func(currentValue []byte) ([]byte, error) {
+				// Be careful: this block can be invoked multiple times if there are races!
+				if currentValue == nil {
+					return nil, couchbase.UpdateCancel // someone deleted it?!
+				}
+				doc, err := unmarshalDocument(docid, currentValue)
+				if err != nil {
+					return nil, err
+				}
+				updatedDoc, shouldUpdate, err := documentUpdateFunc(doc)
+				if err != nil {
+					return nil, err
+				}
+				if shouldUpdate {
+					base.LogTo("Access", "Saving updated channels and access grants of %q", docid)
+					return json.Marshal(updatedDoc)
+				} else {
+					return nil, couchbase.UpdateCancel
+				}
+			})
+		}
 		if err == nil {
 			changeCount++
 		} else if err != couchbase.UpdateCancel {
@@ -1004,11 +1033,11 @@ func (context *DatabaseContext) GetUserViewsEnabled() bool {
 	return false
 }
 
-func (context *DatabaseContext) UseXATTRs() bool {
+func (context *DatabaseContext) UseXattrs() bool {
 	if context.Options.UnsupportedOptions != nil {
-		return context.Options.UnsupportedOptions.EnableXATTR
+		return context.Options.UnsupportedOptions.EnableXattr
 	}
-	return false
+	return DefaultUseXattrs
 }
 
 func (context *DatabaseContext) SetUserViewsEnabled(value bool) {
